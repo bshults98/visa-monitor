@@ -229,6 +229,63 @@ class Analytics:
                 )
         return out
 
+    # ------------------------------------------------------------- retention
+    def prune(self, keep_days: int = 45) -> dict[str, int]:
+        """Drop samples/transitions older than `keep_days`, rewriting in place.
+
+        The hosted runner force-pushes these files as a parentless snapshot on
+        every run, so git cannot delta-compress them against the previous
+        version. Unbounded growth would therefore cost real repo size on every
+        push. Trimming to a fixed window keeps each snapshot roughly constant.
+
+        `keep_days` is deliberately a little wider than the dashboard's 30-day
+        window so a pruning at the boundary never deletes data the rollup is
+        about to display.
+
+        Returns the number of records kept from each file.
+        """
+        cutoff = datetime.now(UTC) - timedelta(days=keep_days)
+
+        kept_samples = 0
+        if self.samples_path.exists():
+            lines = self.samples_path.read_text(encoding="utf-8").splitlines()
+            keep: list[str] = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ts = parse_ts(json.loads(line).get("ts", ""))
+                except ValueError:
+                    continue
+                if ts >= cutoff:
+                    keep.append(line)
+            self.samples_path.write_text(
+                "\n".join(keep) + ("\n" if keep else ""), encoding="utf-8"
+            )
+            kept_samples = len(keep)
+
+        kept_transitions = 0
+        if self.transitions_path.exists():
+            lines = self.transitions_path.read_text(encoding="utf-8").splitlines()
+            keep = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ts = parse_ts(json.loads(line).get("ts", ""))
+                except ValueError:
+                    continue
+                if ts >= cutoff:
+                    keep.append(line)
+            self.transitions_path.write_text(
+                "\n".join(keep) + ("\n" if keep else ""), encoding="utf-8"
+            )
+            kept_transitions = len(keep)
+
+        return {"samples": kept_samples, "transitions": kept_transitions}
+
     # --------------------------------------------------------------- rollups
     def rollup(self, days: int = 30) -> dict[str, Any]:
         """Compute everything the dashboard and `--report` need."""

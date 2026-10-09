@@ -77,10 +77,11 @@ BASE = Path(os.environ.get("MONITOR_HOME") or Path(__file__).resolve().parent)
 
 URL = "https://indianvisaonline.gov.in/visa/Registration"
 
-WEBHOOK_URL = os.environ.get(
-    "WEBHOOK_URL",
-    "https://webhook.site/b4709261-68c9-4931-91ac-80e3afdccf0f",
-).strip()
+# The webhook URL is a secret. It is NEVER defaulted here: in hosted mode it
+# arrives via a GitHub Actions secret, locally via WEBHOOK_URL in the shell or
+# a .env file (see .env.example). Leaving it empty disables notifications
+# rather than silently sending them somewhere unintended.
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").strip()
 TARGET_COUNTRY = os.environ.get("TARGET_COUNTRY", "BANGLADESH").strip().upper()
 TARGET_CODE = os.environ.get("TARGET_CODE", "BGD").strip().upper()
 SELECT_NAME = os.environ.get("SELECT_NAME", "appl.countryname")
@@ -96,6 +97,15 @@ MAX_BACKOFF = int(os.environ.get("MAX_BACKOFF", "1800"))
 ERROR_THRESHOLD = int(os.environ.get("ERROR_THRESHOLD", "4"))
 HEARTBEAT_HOURS = float(os.environ.get("HEARTBEAT_HOURS", "6"))
 TIMEOUT = float(os.environ.get("TIMEOUT", "30"))
+
+# Samples older than this are dropped on each render. Kept wider than the
+# 30-day dashboard window so a prune at the boundary never deletes data the
+# rollup is about to show, and so a few days of history survive an outage.
+RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "45"))
+
+# Passphrase shown as a lock screen on the rendered dashboard. Hashed at
+# render time so the plaintext never lands in the published HTML.
+DASH_PASSPHRASE = os.environ.get("DASH_PASSPHRASE", "")
 
 STATE_FILE = BASE / "state.json"
 LOG_FILE = BASE / "monitor.log"
@@ -323,7 +333,7 @@ def send_webhook(log: logging.Logger, payload: dict, retries: int = 3) -> bool:
 # ---------------------------------------------------------------------------
 # Scheduling
 # ---------------------------------------------------------------------------
-def next_sleep(errors: int, log: logging.Logger) -> float:
+def next_sleep(errors: int, log: logging.Logger, force_fast: bool = False) -> float:
     now = datetime.now(BST)
 
     if errors:
@@ -336,10 +346,11 @@ def next_sleep(errors: int, log: logging.Logger) -> float:
         )
         return delay
 
-    if in_fast_window(now):
+    if force_fast or in_fast_window(now):
         delay = float(random.randint(FAST_MIN, FAST_MAX))
         log.info(
-            "FAST WINDOW [BST %s]: next check in %.0fs",
+            "%s[BST %s]: next check in %.0fs",
+            "FAST " if force_fast else "FAST WINDOW ",
             now.strftime("%H:%M"),
             delay,
         )
@@ -378,6 +389,152 @@ def _interruptible_sleep(seconds: float) -> None:
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
+def _process_cycle(
+    *,
+    log: logging.Logger,
+    analytics: Analytics,
+    state: dict,
+    res: dict,
+    latency_ms: int | None,
+    render: bool = True,
+) -> dict:
+    """One check -> record -> notify -> maybe re-render.
+
+    Shared by the long-running loop and --once so that hosted (Actions) runs
+    get identical transition / armed / notification semantics to a local
+    daemon. Mutates and returns `state`.
+    """
+    armed = bool(state.get("armed", True))
+    avail = bool(res["available"])
+    new_state = ONLINE if avail else OFFLINE
+
+    # Always record the sample -- this is the raw trend data.
+    transition = analytics.record_sample(
+        Sample(
+            ts=now_iso(UTC),
+            state=new_state,
+            available=avail,
+            option_count=res.get("option_count"),
+            latency_ms=latency_ms,
+        )
+    )
+    roll = analytics.rollup(days=7)
+
+    log.info(
+        "check: available=%-5s options=%-4d%s",
+        str(avail),
+        res["option_count"],
+        f"  latency={latency_ms}ms" if latency_ms is not None else "",
+    )
+    if transition:
+        log.info(
+            "transition: %s -> %s (previous held %s)",
+            transition.from_state,
+            transition.to_state,
+            humanize(transition.span_seconds),
+        )
+
+    flips = roll.get("flips_today", 0)
+    cur_streak = (
+        roll["current"]["streak_human"] if roll.get("current") else humanize(0)
+    )
+    uptime_7d = roll["totals"]["uptime_pct"]
+
+    # --- transition-driven notification (exact online/offline events)
+    if transition and transition.to_state == ONLINE:
+        send_webhook(
+            log,
+            notifier.available(
+                country=TARGET_COUNTRY,
+                field=SELECT_NAME,
+                option_count=res["option_count"],
+                offline_for_s=transition.span_seconds,
+                flips_today=flips,
+                streak_human=cur_streak,
+                uptime_7d=uptime_7d,
+            ),
+        )
+        state["armed"] = False
+        log.warning(
+            "*** %s APPEARED in dropdown after %s - notified ***",
+            TARGET_COUNTRY,
+            humanize(transition.span_seconds),
+        )
+        if render:
+            _render_dashboard(analytics, log)
+    elif transition and transition.to_state == OFFLINE:
+        send_webhook(
+            log,
+            notifier.unavailable(
+                country=TARGET_COUNTRY,
+                field=SELECT_NAME,
+                option_count=res["option_count"],
+                online_for_s=transition.span_seconds,
+                flips_today=flips,
+            ),
+        )
+        state["armed"] = True
+        log.info(
+            "%s left dropdown after %s -> re-armed",
+            TARGET_COUNTRY,
+            humanize(transition.span_seconds),
+        )
+        if render:
+            _render_dashboard(analytics, log)
+    elif avail and armed:
+        # No transition recorded (e.g. fresh install with BD already up)
+        # but we still owe the user a first notification.
+        send_webhook(
+            log,
+            notifier.available(
+                country=TARGET_COUNTRY,
+                field=SELECT_NAME,
+                option_count=res["option_count"],
+                offline_for_s=None,
+                flips_today=flips,
+                streak_human=cur_streak,
+                uptime_7d=uptime_7d,
+            ),
+        )
+        state["armed"] = False
+        log.warning("*** %s present in dropdown - notified ***", TARGET_COUNTRY)
+    elif not avail and not armed:
+        state["armed"] = True
+        log.info("%s not in dropdown -> re-armed", TARGET_COUNTRY)
+
+    # Periodic liveness signal so a dead process is noticeable.
+    if HEARTBEAT_HOURS > 0:
+        last_heartbeat = state.get("last_heartbeat")
+        due = True
+        if last_heartbeat:
+            try:
+                elapsed = (
+                    datetime.now(UTC) - datetime.fromisoformat(last_heartbeat)
+                ).total_seconds()
+                due = elapsed >= HEARTBEAT_HOURS * 3600
+            except ValueError:
+                due = True
+        if due:
+            send_webhook(
+                log,
+                notifier.heartbeat(
+                    country=TARGET_COUNTRY,
+                    field=SELECT_NAME,
+                    state=new_state,
+                    option_count=res["option_count"],
+                    armed=bool(state.get("armed", True)),
+                    uptime_7d=uptime_7d,
+                    samples_today=roll["totals"]["samples"],
+                ),
+            )
+            state["last_heartbeat"] = now_iso()
+
+    state["last_run"] = now_iso(BST)
+    state["last_errors"] = 0
+    save_state(state)
+    return state
+
+
 def run(args: argparse.Namespace) -> int:
     # _STOP is module-level (set by signal handlers); it is also assigned in
     # the KeyboardInterrupt branch below, so it MUST be declared global here
@@ -418,24 +575,33 @@ def run(args: argparse.Namespace) -> int:
     )
     log.info("state     : armed=%s last_heartbeat=%s", armed, last_heartbeat or "none")
     log.info("scripts   : %s", BASE)
+    if args.burst_min:
+        log.info("burst     : exiting cleanly after %d min", args.burst_min)
+    if args.force_fast:
+        log.info("force-fast: schedule overridden, always polling fast")
     log.info("=" * 62)
 
-    send_webhook(
-        log,
-        {
-            "event": "MONITOR_STARTED",
-            "country": TARGET_COUNTRY,
-            "field": SELECT_NAME,
-            "ts": now_iso(),
-            "timezone": "BST (Asia/Dhaka, UTC+6)",
-            "fast_windows": FAST_WINDOWS,
-            "baseline_interval_s": BASE_INTERVAL,
-            "host": sys.platform,
-            "armed": armed,
-        },
+    burst_deadline = (
+        time.monotonic() + args.burst_min * 60 if args.burst_min else None
     )
 
+    if not args.no_startup_webhook:
+        send_webhook(
+            log,
+            notifier.started(
+                country=TARGET_COUNTRY,
+                field=SELECT_NAME,
+                armed=armed,
+                fast_windows=FAST_WINDOWS,
+                baseline_interval=BASE_INTERVAL,
+                host=sys.platform,
+            ),
+        )
+
     while not _STOP:
+        if burst_deadline is not None and time.monotonic() >= burst_deadline:
+            log.info("burst window complete after %d min - exiting", args.burst_min)
+            break
         try:
             t0 = time.monotonic()
             res = check_once()
@@ -444,124 +610,16 @@ def run(args: argparse.Namespace) -> int:
             if blocked_sent:
                 blocked_sent = False
 
-            avail = res["available"]
-            new_state = ONLINE if avail else OFFLINE
-
-            # Always record the sample -- this is the raw trend data.
-            transition = analytics.record_sample(
-                Sample(
-                    ts=now_iso(UTC),
-                    state=new_state,
-                    available=avail,
-                    option_count=res.get("option_count"),
-                    latency_ms=latency_ms,
-                )
+            state = _process_cycle(
+                log=log,
+                analytics=analytics,
+                state=state,
+                res=res,
+                latency_ms=latency_ms,
+                render=not args.no_render,
             )
-            roll = analytics.rollup(days=7)
-
-            log.info(
-                "check: available=%-5s options=%-4d latency=%dms%s",
-                str(avail),
-                res["option_count"],
-                latency_ms,
-                f"  TRANSITION {transition.from_state}->{transition.to_state}"
-                if transition
-                else "",
-            )
-
-            # --- transition-driven notification (exact online/offline events)
-            if transition:
-                flips = roll.get("flips_today", 0)
-                if transition.to_state == ONLINE:
-                    send_webhook(
-                        log,
-                        notifier.available(
-                            country=TARGET_COUNTRY,
-                            field=SELECT_NAME,
-                            option_count=res["option_count"],
-                            offline_for_s=transition.span_seconds,
-                            flips_today=flips,
-                            streak_human=roll["current"]["streak_human"]
-                            if roll.get("current")
-                            else humanize(0),
-                            uptime_7d=roll["totals"]["uptime_pct"],
-                        ),
-                    )
-                    armed = False
-                    log.warning(
-                        "*** %s APPEARED in dropdown after %s - notified ***",
-                        TARGET_COUNTRY,
-                        humanize(transition.span_seconds),
-                    )
-                elif transition.to_state == OFFLINE:
-                    send_webhook(
-                        log,
-                        notifier.unavailable(
-                            country=TARGET_COUNTRY,
-                            field=SELECT_NAME,
-                            option_count=res["option_count"],
-                            online_for_s=transition.span_seconds,
-                            flips_today=flips,
-                        ),
-                    )
-                    armed = True
-                    log.info(
-                        "%s left dropdown after %s -> re-armed",
-                        TARGET_COUNTRY,
-                        humanize(transition.span_seconds),
-                    )
-
-                # Re-render the public dashboard whenever the state changes.
-                if not args.no_render:
-                    _render_dashboard(analytics, log)
-            elif avail and armed:
-                # No transition recorded (e.g. fresh install with BD already up)
-                # but we still owe the user a first notification.
-                send_webhook(
-                    log,
-                    notifier.available(
-                        country=TARGET_COUNTRY,
-                        field=SELECT_NAME,
-                        option_count=res["option_count"],
-                        offline_for_s=None,
-                        flips_today=roll.get("flips_today", 0),
-                        streak_human=roll["current"]["streak_human"]
-                        if roll.get("current")
-                        else humanize(0),
-                        uptime_7d=roll["totals"]["uptime_pct"],
-                    ),
-                )
-                armed = False
-                log.warning("*** %s present in dropdown - notified ***", TARGET_COUNTRY)
-            elif not avail and not armed:
-                armed = True
-                log.info("%s not in dropdown -> re-armed", TARGET_COUNTRY)
-
-            # Periodic liveness signal so a dead process is noticeable.
-            if HEARTBEAT_HOURS > 0:
-                due = True
-                if last_heartbeat:
-                    try:
-                        elapsed = (
-                            datetime.now(UTC) - datetime.fromisoformat(last_heartbeat)
-                        ).total_seconds()
-                        due = elapsed >= HEARTBEAT_HOURS * 3600
-                    except ValueError:
-                        due = True
-                if due:
-                    send_webhook(
-                        log,
-                        notifier.heartbeat(
-                            country=TARGET_COUNTRY,
-                            field=SELECT_NAME,
-                            state=new_state,
-                            option_count=res["option_count"],
-                            armed=armed,
-                            uptime_7d=roll["totals"]["uptime_pct"],
-                            samples_today=roll["totals"]["samples"],
-                        ),
-                    )
-                    last_heartbeat = now_iso()
+            armed = bool(state.get("armed", True))
+            last_heartbeat = state.get("last_heartbeat")
 
         except KeyboardInterrupt:
             _STOP = True
@@ -589,12 +647,9 @@ def run(args: argparse.Namespace) -> int:
                         last_error=str(exc),
                     ),
                 )
-        finally:
             state.update(
                 {
-                    "armed": armed,
                     "blocked_sent": blocked_sent,
-                    "last_heartbeat": last_heartbeat,
                     "last_run": now_iso(BST),
                     "last_errors": errors,
                 }
@@ -604,7 +659,7 @@ def run(args: argparse.Namespace) -> int:
         if _STOP:
             break
 
-        _interruptible_sleep(next_sleep(errors, log))
+        _interruptible_sleep(next_sleep(errors, log, force_fast=args.force_fast))
 
     log.info("stopped cleanly")
     return 0
@@ -623,64 +678,48 @@ def _render_dashboard(
     try:
         import dashboard as _dashboard
 
-        return _dashboard.render(analytics, out_dir or (BASE / "site"), days=days)
+        return _dashboard.render(
+            analytics,
+            out_dir or (BASE / "site"),
+            days=days,
+            passphrase=DASH_PASSPHRASE or None,
+        )
     except Exception as exc:  # noqa: BLE001
         log.warning("dashboard render failed: %s", exc)
         return {}
 
 
 def do_once(args: argparse.Namespace) -> int:
+    """Single check, then exit -- the unit used by hosted (Actions) runs."""
     log = log_setup(args.verbose)
+    t0 = time.monotonic()
     try:
         res = check_once()
     except Exception as exc:  # noqa: BLE001
         log.error("check failed: %s", exc)
         print(json.dumps({"available": False, "error": str(exc)}, indent=2))
         return 1
+    latency_ms = int((time.monotonic() - t0) * 1000)
 
-    log.info(
-        "check: available=%-5s options=%d",
-        str(res["available"]),
-        res["option_count"],
-    )
     print(json.dumps(res, indent=2))
 
-    # Record the sample so even one-shot runs contribute to the trends.
-    if not args.no_record:
-        analytics = Analytics(BASE / "data")
-        analytics.seed_state()
-        transition = analytics.record_sample(
-            Sample(
-                ts=now_iso(UTC),
-                state=ONLINE if res["available"] else OFFLINE,
-                available=res["available"],
-                option_count=res.get("option_count"),
-            )
-        )
-        if transition:
-            print(
-                f"transition: {transition.from_state} -> {transition.to_state} "
-                f"(previous held {humanize(transition.span_seconds)})"
-            )
-        if not args.no_render:
-            _render_dashboard(analytics, log)
+    if args.no_record:
+        # Diagnostics mode: report only, touch nothing.
+        return 0
 
-    if res["available"] and not args.no_notify:
-        roll = Analytics(BASE / "data").rollup(days=7)
-        send_webhook(
-            log,
-            notifier.available(
-                country=TARGET_COUNTRY,
-                field=SELECT_NAME,
-                option_count=res["option_count"],
-                offline_for_s=None,
-                flips_today=roll.get("flips_today", 0),
-                streak_human=roll["current"]["streak_human"]
-                if roll.get("current")
-                else humanize(0),
-                uptime_7d=roll["totals"]["uptime_pct"],
-            ),
-        )
+    # Same cycle logic as the long-running loop so hosted runs get identical
+    # transition detection, armed handling and notifications.
+    state = load_state()
+    analytics = Analytics(BASE / "data")
+    analytics.seed_state()
+    _process_cycle(
+        log=log,
+        analytics=analytics,
+        state=state,
+        res=res,
+        latency_ms=latency_ms,
+        render=not args.no_render,
+    )
     # Exit 0 whenever the check itself succeeded; availability is reported in
     # the JSON above. A failed check already returned 1 earlier.
     return 0
@@ -709,6 +748,17 @@ def do_render(args: argparse.Namespace) -> int:
     analytics.seed_state()
     if not analytics.samples_path.exists():
         log.warning("no samples yet at %s - nothing to render", analytics.samples_path)
+    else:
+        # Trim to the retention window before rendering. Hosted runs
+        # force-push these files as a parentless snapshot each cycle, so
+        # unbounded growth would cost repo size on every push.
+        kept = analytics.prune(keep_days=RETENTION_DAYS)
+        log.info(
+            "retention  : kept %d samples / %d transitions (last %d days)",
+            kept["samples"],
+            kept["transitions"],
+            RETENTION_DAYS,
+        )
     out = Path(args.out) if args.out else (BASE / "site")
     data = _render_dashboard(analytics, log, out_dir=out, days=args.days)
     t = data.get("totals", {})
@@ -783,6 +833,25 @@ def main() -> int:
         "--out",
         default=None,
         help="output directory for --render (default: ./site)",
+    )
+    p.add_argument(
+        "--burst-min",
+        type=int,
+        default=0,
+        help=(
+            "run the loop for N minutes then exit cleanly (hosted mode: a "
+            "scheduled job covers a reset window then stops)"
+        ),
+    )
+    p.add_argument(
+        "--force-fast",
+        action="store_true",
+        help="ignore the schedule and always poll at the fast interval",
+    )
+    p.add_argument(
+        "--no-startup-webhook",
+        action="store_true",
+        help="skip the MONITOR_STARTED webhook (used by hosted short runs)",
     )
     p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     args = p.parse_args()

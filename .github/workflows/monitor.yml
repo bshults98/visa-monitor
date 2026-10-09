@@ -1,0 +1,154 @@
+# Hosted monitor: polls the Indian visa country dropdown and publishes a
+# static dashboard to GitHub Pages.
+#
+# Scheduling notes (from GitHub's own docs):
+#   * The shortest interval for `schedule` is 5 minutes.
+#   * Scheduled runs are often DELAYED at the top of every hour, and may be
+#     dropped under load, so every trigger here sits at :55 or on offset
+#     minutes (:07/:22/:37/:52) rather than :00.
+#   * All cron fields are UTC. Bangladesh Standard Time is UTC+6, so:
+#         00:00-00:30 BST  ==  18:00-18:30 UTC (previous day)
+#         08:00-09:30 BST  ==  02:00-03:30 UTC
+#     Each burst therefore starts 5 minutes early so a delayed start still
+#     covers the whole window.
+#
+# The burst jobs are the trick that beats the 5-minute cron floor: one run
+# starts just before a reset window and then polls every 60-90s internally
+# for the length of that window. Cron cannot do 60s, but a job loop can.
+#
+# Runtime state (samples.jsonl, transitions.jsonl, state.json) is force-
+# pushed to the `data` branch as a SINGLE parentless commit each run, so the
+# branch never accumulates history -- only the current snapshot is retained.
+# That keeps the repo small forever while still giving the dashboard a full
+# 30-day window of raw samples to compute trends from.
+#
+# The `WEBHOOK_URL` and `DASH_PASSPHRASE` values come from repository
+# secrets and are never written into this file, so it is safe to keep the
+# repo public.
+name: monitor
+
+on:
+  schedule:
+    # Baseline: every 15 minutes, on offset minutes to dodge the
+    # top-of-the-hour congestion that delays scheduled runs.
+    - cron: "7,22,37,52 * * * *"
+    # Fast window 1: 23:55 BST (17:55 UTC) -> poll fast for 40 min.
+    - cron: "55 17 * * *"
+    # Fast window 2: 07:55 BST (01:55 UTC) -> poll fast for 110 min.
+    - cron: "55 1 * * *"
+  workflow_dispatch:
+    inputs:
+      burst_minutes:
+        description: "Poll fast for N minutes (0 = a single baseline check)"
+        default: "0"
+        required: false
+
+# One monitor at a time: the baseline and the two bursts all write the same
+# data branch, and concurrent runs would race on it.
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push the `data` branch
+  pages: write # deploy the dashboard
+  id-token: write # Pages OIDC
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    # Longest burst is 110 min; leave headroom for retries and slow checks.
+    timeout-minutes: 150
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Restore runtime state from data branch
+        run: |
+          set -euo pipefail
+          mkdir -p data
+          if git fetch origin data 2>/dev/null && git rev-parse --verify origin/data >/dev/null 2>&1; then
+            git checkout origin/data -- data state.json
+            echo "restored $(wc -l < data/samples.jsonl 2>/dev/null || echo 0) samples"
+          else
+            echo "no data branch yet - starting fresh"
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Decide run mode
+        id: mode
+        run: |
+          set -euo pipefail
+          # Manual dispatch can request an arbitrary burst length.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            burst="${{ github.event.inputs.burst_minutes }}"
+            echo "burst=${burst:-0}" >> "$GITHUB_OUTPUT"
+            echo "manual dispatch: burst=${burst:-0} min"
+            exit 0
+          fi
+          # Scheduled runs: map the cron that fired to a burst length.
+          case "${{ github.event.schedule }}" in
+            "55 17 * * *") echo "burst=40"  >> "$GITHUB_OUTPUT" ;;  # 23:55 BST
+            "55 1 * * *")  echo "burst=110" >> "$GITHUB_OUTPUT" ;;  # 07:55 BST
+            *)             echo "burst=0"   >> "$GITHUB_OUTPUT" ;;  # baseline
+          esac
+
+      - name: Run monitor
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          DASH_PASSPHRASE: ${{ secrets.DASH_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          burst="${{ steps.mode.outputs.burst }}"
+          if [ "$burst" -gt 0 ]; then
+            echo ">>> fast burst for ${burst} min"
+            python monitor.py --burst-min "$burst" --force-fast --no-startup-webhook
+          else
+            echo ">>> single baseline check"
+            python monitor.py --once
+          fi
+
+      - name: Render dashboard
+        env:
+          DASH_PASSPHRASE: ${{ secrets.DASH_PASSPHRASE }}
+        run: python monitor.py --render
+
+      - name: Save runtime state to data branch
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          # Build a parentless commit holding only the state files, then
+          # force-push it. Because the commit has no parent, the previous
+          # snapshot becomes unreachable and GitHub's GC reclaims it, so the
+          # branch stays one-commit-small no matter how long it runs.
+          export GIT_INDEX_FILE=/tmp/state.index
+          git read-tree --empty
+          git add -f data state.json
+          tree=$(git write-tree)
+          commit=$(git commit-tree "$tree" -m "state $(date -u +%FT%TZ)")
+          git push --force origin "$commit:refs/heads/data"
+          echo "pushed state snapshot $commit"
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,9 +1,11 @@
-# runtime state / analytics output (regenerated, never committed)
-data/
-site/
-state.json
+# runtime state / analytics output at the repo root (regenerated, never
+# committed to main). Leading slashes anchor these to the root so that the
+# hosted runner's persist/ tree is NOT excluded by the same patterns.
+/data/
+/site/
+/state.json
+/monitor.log
 *.log
-monitor.log
 
 # secrets
 .env
@@ -31,4 +33,5 @@ final_err.txt
 combinations_1821.txt
 more cards.txt
 sample_cards.txt
+candidates_*.txt
 *.cards.txt
