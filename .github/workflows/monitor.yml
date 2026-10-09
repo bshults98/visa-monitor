@@ -27,6 +27,11 @@
 # repo public.
 name: monitor
 
+# NOTE: GitHub re-parses this file and re-registers the cron schedule on
+# every push to the default branch. If scheduled runs ever stop appearing in
+# the Actions tab while manual runs still work, push a trivial change here to
+# force re-registration.
+
 on:
   schedule:
     # Baseline: every 15 minutes, on offset minutes to dodge the
