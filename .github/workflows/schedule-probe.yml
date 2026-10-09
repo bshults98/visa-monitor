@@ -11,6 +11,9 @@
 name: schedule-probe
 
 on:
+  push:
+    paths:
+      - ".github/workflows/schedule-probe.yml"
   schedule:
     - cron: "*/5 * * * *"
 
@@ -23,4 +26,6 @@ jobs:
     timeout-minutes: 3
     steps:
       - name: Echo
-        run: echo "schedule-probe fired at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        run: |
+          echo "trigger=${{ github.event_name }}"
+          echo "fired at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
