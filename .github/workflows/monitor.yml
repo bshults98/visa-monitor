@@ -122,6 +122,7 @@ jobs:
       - name: Render dashboard
         env:
           DASH_PASSPHRASE: ${{ secrets.DASH_PASSPHRASE }}
+          PAGES_CNAME: ${{ vars.PAGES_CNAME }}
         run: python monitor.py --render
 
       - name: Save runtime state to data branch

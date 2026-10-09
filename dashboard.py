@@ -451,6 +451,18 @@ def render(
 
     (out_dir / "index.html").write_text(page, encoding="utf-8")
 
+    # GitHub Pages needs a CNAME file in the deployed artifact to serve a
+    # custom domain. Without it Pages drops back to the *.github.io host on
+    # the next deploy, silently.
+    cname = os.environ.get("PAGES_CNAME", "").strip()
+    if cname:
+        (out_dir / "CNAME").write_text(cname + "\n", encoding="utf-8")
+    else:
+        try:
+            (out_dir / "CNAME").unlink()
+        except FileNotFoundError:
+            pass
+
     # status.json / status.txt are cleartext by design, for cheap consumers
     # (curl, jq, chatbots). When a passphrase is set they would be served
     # publicly by any static host and hand round the same data the lock is
