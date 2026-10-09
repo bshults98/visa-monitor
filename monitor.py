@@ -435,9 +435,7 @@ def _process_cycle(
         )
 
     flips = roll.get("flips_today", 0)
-    cur_streak = (
-        roll["current"]["streak_human"] if roll.get("current") else humanize(0)
-    )
+    cur_streak = roll["current"]["streak_human"] if roll.get("current") else humanize(0)
     uptime_7d = roll["totals"]["uptime_pct"]
 
     # --- transition-driven notification (exact online/offline events)
@@ -581,9 +579,7 @@ def run(args: argparse.Namespace) -> int:
         log.info("force-fast: schedule overridden, always polling fast")
     log.info("=" * 62)
 
-    burst_deadline = (
-        time.monotonic() + args.burst_min * 60 if args.burst_min else None
-    )
+    burst_deadline = time.monotonic() + args.burst_min * 60 if args.burst_min else None
 
     if not args.no_startup_webhook:
         send_webhook(
