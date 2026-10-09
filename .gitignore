@@ -1,0 +1,34 @@
+# runtime state / analytics output (regenerated, never committed)
+data/
+site/
+state.json
+*.log
+monitor.log
+
+# secrets
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# test scratch
+loop_*.txt
+a.txt
+a_err.txt
+b.txt
+b_err.txt
+final_out.txt
+final_err.txt
+
+# unrelated card data dropped in this folder by another project - never commit
+combinations_1821.txt
+more cards.txt
+sample_cards.txt
+*.cards.txt
