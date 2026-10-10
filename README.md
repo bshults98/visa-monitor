@@ -44,21 +44,20 @@ dropdown whose label is exactly *"Country/Region you are applying visa from"*.
 
 ### Schedule
 
-GitHub's shortest cron interval is **5 minutes**, and scheduled runs are
-frequently delayed at the top of every hour. So:
+All times below are **Dhaka time (Asia/Dhaka, UTC+6)**.
 
-* **Baseline** — `7,22,37,52 * * * *` UTC (every 15 min, offset minutes to
-  dodge top-of-hour congestion) → one check per run.
-* **Fast window 1** — `55 17 * * *` UTC = **23:55 BST** → one job polls every
-  60–90 s for 40 min, covering 00:00–00:35 BST.
-* **Fast window 2** — `55 1 * * *` UTC = **07:55 BST** → one job polls every
-  60–90 s for 110 min, covering 07:55–09:45 BST.
+GitHub's shortest cron interval is **5 minutes**, and scheduled runs get
+delayed or dropped when many short runs queue up. So the monitor uses
+**few long jobs instead of many short ones**: one job every 2 hours
+(`7 */2 * * *` UTC), each looping internally for 2 h 10 min.
 
-The burst jobs are how a 60–90 s cadence is achieved despite the 5-minute cron
-floor: the job starts just before a reset window and loops internally.
+The job picks its own poll interval:
 
-Each burst starts 5 minutes **early** so a delayed GitHub start still covers
-the whole window.
+* **60-90 s** while inside a reset window (00:00-00:30 and 08:00-09:30 Dhaka)
+* **15 min** the rest of the time
+
+Consecutive jobs overlap by 10 minutes, so a delayed start never leaves a
+gap, and both reset windows are fully covered.
 
 > The actual reset hour is **community folklore and unverified** — the site
 > exposes no quota, reset time, or slot count. The dashboard's hour-of-day
@@ -159,7 +158,7 @@ Config via environment variables (all optional, defaults shown):
 | `DASH_PASSPHRASE` | *(empty = unencrypted)* | Encrypts the published dashboard |
 | `TARGET_COUNTRY` | `BANGLADESH` | Which country to watch |
 | `SELECT_NAME` | `appl.countryname` | Which dropdown to parse |
-| `FAST_WINDOWS` | `00:00-00:30,08:00-09:30` | BST windows for fast polling |
+| `FAST_WINDOWS` | `00:00-00:30,08:00-09:30` | Dhaka-time windows for fast polling |
 | `FAST_MIN` / `FAST_MAX` | `60` / `90` | Fast poll interval (seconds) |
 | `BASE_INTERVAL` | `900` | Baseline poll interval (seconds) |
 | `RETENTION_DAYS` | `45` | Samples older than this are pruned |
