@@ -36,9 +36,11 @@ name: monitor
 
 on:
   schedule:
-    # Every 2 hours at :07. Covers 00:00-00:30 and 08:00-09:30 BST because
-    # each job spans 2h10m and the monitor polls fast inside those windows.
-    - cron: "7 */2 * * *"
+    # Twice hourly at :07 and :37. NOTE: '*/2' in the hour field does NOT
+    # fire on this repository -- use '*' or literal hours only.
+    # Each job runs 35 min, so consecutive jobs overlap by 5 min and every
+    # reset window is covered even if GitHub delays or drops one trigger.
+    - cron: "7,37 * * * *"
   workflow_dispatch:
     inputs:
       burst_minutes:
@@ -59,8 +61,8 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    # A 2h10m run needs headroom above its own loop time.
-    timeout-minutes: 160
+    # A 35-min run needs headroom above its own loop time.
+    timeout-minutes: 45
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -100,10 +102,10 @@ jobs:
             echo "manual dispatch: burst=$burst min"
             exit 0
           fi
-          # Scheduled: one long run spanning the next two hours. The monitor
-          # itself switches to 60-90s polling whenever it is inside a BST
-          # reset window, so --force-fast is deliberately NOT passed here.
-          echo "burst=130" >> "$GITHUB_OUTPUT"
+          # Scheduled: 35-min run, schedule-aware intervals. The monitor
+          # switches to 60-90s polling whenever it is inside a Dhaka reset
+          # window, so --force-fast is deliberately NOT passed here.
+          echo "burst=35" >> "$GITHUB_OUTPUT"
           echo "force_fast=0" >> "$GITHUB_OUTPUT"
           echo "scheduled: 2h10m continuous run, schedule-aware intervals"
 
