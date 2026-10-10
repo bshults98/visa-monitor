@@ -467,7 +467,7 @@ class Analytics:
                 f"({t['online']} online / {t['offline']} offline / {t['unknown']} unknown)."
             ),
             f"Longest continuous ONLINE spell: {r['longest_online_human']}.",
-            f"Flips today (DHAKA): {r['flips_today']}.",
+            f"Flips today (Dhaka): {r['flips_today']}.",
         ]
         if r["trend"]:
             last = r["trend"][-1]
