@@ -36,11 +36,13 @@ name: monitor
 
 on:
   schedule:
-    # Twice hourly at :07 and :37. NOTE: '*/2' in the hour field does NOT
-    # fire on this repository -- use '*' or literal hours only.
-    # Each job runs 35 min, so consecutive jobs overlap by 5 min and every
-    # reset window is covered even if GitHub delays or drops one trigger.
-    - cron: "7,37 * * * *"
+    # Every 2 hours, explicit hours. Two GitHub quirks forced this shape:
+    #   1. '*/n' step values in the HOUR field never fire here.
+    #   2. High-frequency schedules get throttled hard (see the README), so
+    #      few triggers + LONG jobs beats many short ones.
+    # Each job polls for 5h30m and jobs chain, so even if GitHub drops half
+    # the triggers the chain keeps running and every reset window is covered.
+    - cron: "1 0,2,4,6,8,10,12,14,16,18,20,22 * * *"
   workflow_dispatch:
     inputs:
       burst_minutes:
@@ -61,8 +63,8 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    # A 35-min run needs headroom above its own loop time.
-    timeout-minutes: 45
+    # A 5h30m loop needs headroom above its own runtime (6h GitHub cap).
+    timeout-minutes: 360
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -102,10 +104,10 @@ jobs:
             echo "manual dispatch: burst=$burst min"
             exit 0
           fi
-          # Scheduled: 35-min run, schedule-aware intervals. The monitor
+          # Scheduled: 5h30m run, schedule-aware intervals. The monitor
           # switches to 60-90s polling whenever it is inside a Dhaka reset
           # window, so --force-fast is deliberately NOT passed here.
-          echo "burst=35" >> "$GITHUB_OUTPUT"
+          echo "burst=330" >> "$GITHUB_OUTPUT"
           echo "force_fast=0" >> "$GITHUB_OUTPUT"
           echo "scheduled: 2h10m continuous run, schedule-aware intervals"
 
