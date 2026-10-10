@@ -20,13 +20,13 @@ from typing import Any
 
 from analytics import OFFLINE, ONLINE, humanize
 
-BST = timezone(timedelta(hours=6), name="BST")
+DHAKA = timezone(timedelta(hours=6), name="DHAKA")
 
 APPLY_URL = "https://indianvisaonline.gov.in/visa/Registration"
 
 
-def _bst_now() -> str:
-    return datetime.now(BST).isoformat(timespec="seconds")
+def _dhaka_now() -> str:
+    return datetime.now(DHAKA).isoformat(timespec="seconds")
 
 
 def started(
@@ -48,8 +48,8 @@ def started(
         "field": field,
         "state": "STARTING",
         "armed": armed,
-        "ts": _bst_now(),
-        "timezone": "BST (Asia/Dhaka, UTC+6)",
+        "ts": _dhaka_now(),
+        "timezone": "Dhaka (Asia/Dhaka, UTC+6)",
         "fast_windows": fast_windows,
         "baseline_interval_s": baseline_interval,
         "host": host,
@@ -67,7 +67,7 @@ def available(
     streak_human: str,
     uptime_7d: float | None,
 ) -> dict[str, Any]:
-    since = _bst_now()
+    since = _dhaka_now()
     duration_txt = (
         f"after being offline for {humanize(offline_for_s)}"
         if offline_for_s
@@ -113,14 +113,14 @@ def unavailable(
         "event": "BANGLADESH_UNAVAILABLE",
         "summary": (
             f"🔴 {country} dropped OUT of the {field} dropdown {held}. "
-            f"Quota likely re-filled ({flips_today} flip(s) today)."
+            f"It is no longer in the {field} dropdown ({flips_today} change(s) today)."
         ),
         "country": country,
         "field": field,
         "state": OFFLINE,
         "available": False,
         "option_count": option_count,
-        "ts": _bst_now(),
+        "ts": _dhaka_now(),
         "was_online_for_s": round(online_for_s, 1)
         if online_for_s is not None
         else None,
@@ -147,10 +147,10 @@ def blocked(
         "country": country,
         "field": field,
         "state": "BLOCKED",
-        "ts": _bst_now(),
+        "ts": _dhaka_now(),
         "consecutive_errors": consecutive_errors,
         "last_error": last_error,
-        "action": "IP likely WAF-blocked or site structure changed -- check manually",
+        "action": "Check the site manually -- the monitor cannot read it right now.",
         "url": APPLY_URL,
     }
 
@@ -174,7 +174,7 @@ def heartbeat(
         "country": country,
         "field": field,
         "state": state,
-        "ts": _bst_now(),
+        "ts": _dhaka_now(),
         "available": state == ONLINE,
         "option_count": option_count,
         "armed": armed,
@@ -188,7 +188,7 @@ def test(host: str) -> dict[str, Any]:
         "event": "MONITOR_TEST",
         "summary": "🧪 Webhook connectivity test from BD visa monitor.",
         "country": "BANGLADESH",
-        "ts": _bst_now(),
+        "ts": _dhaka_now(),
         "message": "Webhook connectivity test from BD visa monitor",
         "host": host,
     }

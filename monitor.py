@@ -58,15 +58,11 @@ except ImportError as exc:  # pragma: no cover - missing sibling module
 # ---------------------------------------------------------------------------
 # Timezones
 # ---------------------------------------------------------------------------
-# Fixed UTC offsets are used instead of zoneinfo.ZoneInfo so that no `tzdata`
-# package is required (stock Windows Python cannot resolve 'Asia/Dhaka'
-# without it). Neither Bangladesh nor India observes DST, so the offsets are
-# permanent and always correct.
+# Dhaka time (Asia/Dhaka) is UTC+6 with no DST. A fixed offset is used instead
+# of zoneinfo.ZoneInfo so that no `tzdata` package is required (stock Windows
+# Python cannot resolve 'Asia/Dhaka' without it).
 # ---------------------------------------------------------------------------
-BST = timezone(timedelta(hours=6), name="BST")  # Asia/Dhaka
-IST = timezone(
-    timedelta(hours=5, minutes=30), name="IST"
-)  # Asia/Kolkata (reference only)
+DHAKA = timezone(timedelta(hours=6), name="DHAKA")  # Asia/Dhaka, UTC+6
 UTC = timezone.utc
 
 
@@ -86,7 +82,7 @@ TARGET_COUNTRY = os.environ.get("TARGET_COUNTRY", "BANGLADESH").strip().upper()
 TARGET_CODE = os.environ.get("TARGET_CODE", "BGD").strip().upper()
 SELECT_NAME = os.environ.get("SELECT_NAME", "appl.countryname")
 
-# Fast-polling windows, interpreted in BST (Asia/Dhaka). Reset times are
+# Fast-polling windows, interpreted in Dhaka time (Asia/Dhaka). Reset times are
 # community folklore (unverified), so these are configured rather than assumed.
 FAST_WINDOWS = os.environ.get("FAST_WINDOWS", "00:00-00:30,08:00-09:30")
 FAST_MIN = int(os.environ.get("FAST_MIN", "60"))  # seconds
@@ -215,7 +211,7 @@ WINDOWS = parse_windows(FAST_WINDOWS)
 
 
 def in_fast_window(now: datetime | None = None) -> bool:
-    now = now or datetime.now(BST)
+    now = now or datetime.now(DHAKA)
     mins = now.hour * 60 + now.minute
     return any(s <= mins < e for s, e in WINDOWS)
 
@@ -334,7 +330,7 @@ def send_webhook(log: logging.Logger, payload: dict, retries: int = 3) -> bool:
 # Scheduling
 # ---------------------------------------------------------------------------
 def next_sleep(errors: int, log: logging.Logger, force_fast: bool = False) -> float:
-    now = datetime.now(BST)
+    now = datetime.now(DHAKA)
 
     if errors:
         # Exponential backoff while the site is unhappy.
@@ -349,7 +345,7 @@ def next_sleep(errors: int, log: logging.Logger, force_fast: bool = False) -> fl
     if force_fast or in_fast_window(now):
         delay = float(random.randint(FAST_MIN, FAST_MAX))
         log.info(
-            "%s[BST %s]: next check in %.0fs",
+            "%s[Dhaka %s]: next check in %.0fs",
             "FAST " if force_fast else "FAST WINDOW ",
             now.strftime("%H:%M"),
             delay,
@@ -527,7 +523,7 @@ def _process_cycle(
             )
             state["last_heartbeat"] = now_iso()
 
-    state["last_run"] = now_iso(BST)
+    state["last_run"] = now_iso(DHAKA)
     state["last_errors"] = 0
     save_state(state)
     return state
@@ -646,7 +642,7 @@ def run(args: argparse.Namespace) -> int:
             state.update(
                 {
                     "blocked_sent": blocked_sent,
-                    "last_run": now_iso(BST),
+                    "last_run": now_iso(DHAKA),
                     "last_errors": errors,
                 }
             )

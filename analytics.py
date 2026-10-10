@@ -16,10 +16,11 @@ UNKNOWN never counts as OFFLINE. Treating an outage as "BD closed" would
 corrupt every uptime percentage we report, so UNKNOWN intervals are tracked
 separately and excluded from availability math.
 
-Timestamps are stored as ISO-8601 with an explicit UTC offset. Timezone math
-uses fixed offsets (BST = UTC+6, IST = UTC+5:30) because neither Bangladesh
-nor India observes DST -- this avoids the `tzdata` dependency that stock
-Windows Python needs for zoneinfo.
+Timestamps are stored as ISO-8601 with an explicit UTC offset. This project
+is Bangladesh-facing, so every reported time is Dhaka time (Asia/Dhaka,
+UTC+6, no DST). A fixed UTC offset is used instead of zoneinfo.ZoneInfo so
+no `tzdata` package is needed -- stock Windows Python cannot resolve
+'Asia/Dhaka' without it.
 """
 
 from __future__ import annotations
@@ -31,8 +32,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-BST = timezone(timedelta(hours=6), name="BST")
-IST = timezone(timedelta(hours=5, minutes=30), name="IST")
+# Asia/Dhaka, UTC+6, no DST.
+DHAKA = timezone(timedelta(hours=6), name="DHAKA")
 UTC = timezone.utc
 
 ONLINE = "ONLINE"
@@ -311,10 +312,10 @@ class Analytics:
         counted = by_state[ONLINE] + by_state[OFFLINE]
         uptime_pct = round(100.0 * by_state[ONLINE] / counted, 2) if counted else 0.0
 
-        # --- daily trend (BST calendar days)
+        # --- daily trend (DHAKA calendar days)
         daily: dict[str, dict[str, int]] = {}
         for s in window:
-            day = parse_ts(s.ts).astimezone(BST).strftime("%Y-%m-%d")
+            day = parse_ts(s.ts).astimezone(DHAKA).strftime("%Y-%m-%d")
             bucket = daily.setdefault(day, {ONLINE: 0, OFFLINE: 0, UNKNOWN: 0})
             bucket[s.state] = bucket.get(s.state, 0) + 1
         trend = []
@@ -331,12 +332,12 @@ class Analytics:
                 }
             )
 
-        # --- hour-of-day heatmap (BST hours): which hours BD tends to open
+        # --- hour-of-day heatmap (DHAKA hours): which hours BD has been listed
         hourly: dict[int, list[int]] = {h: [0, 0] for h in range(24)}
         for s in window:
             if s.state not in (ONLINE, OFFLINE):
                 continue
-            h = parse_ts(s.ts).astimezone(BST).hour
+            h = parse_ts(s.ts).astimezone(DHAKA).hour
             hourly[h][0 if s.state == ONLINE else 1] += 1
         heatmap = []
         for h in range(24):
@@ -378,24 +379,26 @@ class Analytics:
         if current and current.state == ONLINE:
             longest_online = max(longest_online, current_streak_s)
 
-        # --- how many times today (BST) did BD flip availability
-        today_bst = now.astimezone(BST).strftime("%Y-%m-%d")
+        # --- how many times today (DHAKA) did BD flip availability
+        today_dhaka = now.astimezone(DHAKA).strftime("%Y-%m-%d")
         flips_today = 0
         for t in transitions:
-            same_day = parse_ts(t.ts).astimezone(BST).strftime("%Y-%m-%d") == today_bst
+            same_day = (
+                parse_ts(t.ts).astimezone(DHAKA).strftime("%Y-%m-%d") == today_dhaka
+            )
             if same_day and {t.from_state, t.to_state} == {ONLINE, OFFLINE}:
                 flips_today += 1
 
         recent = transitions[-15:]
         return {
-            "generated_at": now_iso(BST),
+            "generated_at": now_iso(DHAKA),
             "window_days": days,
             "current": (
                 {
                     "state": current.state,
                     "since": current.ts,
-                    "since_bst": parse_ts(current.ts)
-                    .astimezone(BST)
+                    "since_dhaka": parse_ts(current.ts)
+                    .astimezone(DHAKA)
                     .isoformat(timespec="seconds"),
                     "option_count": current.option_count,
                     "available": current.available,
@@ -421,8 +424,8 @@ class Analytics:
             "transitions": [
                 {
                     "ts": t.ts,
-                    "ts_bst": parse_ts(t.ts)
-                    .astimezone(BST)
+                    "ts_dhaka": parse_ts(t.ts)
+                    .astimezone(DHAKA)
                     .isoformat(timespec="seconds"),
                     "from": t.from_state,
                     "to": t.to_state,
@@ -435,8 +438,8 @@ class Analytics:
             "latest_samples": [
                 {
                     "ts": s.ts,
-                    "ts_bst": parse_ts(s.ts)
-                    .astimezone(BST)
+                    "ts_dhaka": parse_ts(s.ts)
+                    .astimezone(DHAKA)
                     .isoformat(timespec="seconds"),
                     "state": s.state,
                     "option_count": s.option_count,
@@ -457,14 +460,14 @@ class Analytics:
         lines = [
             (
                 f"BD is currently {cur['state']} "
-                f"(has been for {cur['streak_human']}, since {cur['since_bst']})."
+                f"(has been for {cur['streak_human']}, since {cur['since_dhaka']})."
             ),
             (
                 f"Last {r['window_days']}d: uptime {t['uptime_pct']}% "
                 f"({t['online']} online / {t['offline']} offline / {t['unknown']} unknown)."
             ),
             f"Longest continuous ONLINE spell: {r['longest_online_human']}.",
-            f"Flips today (BST): {r['flips_today']}.",
+            f"Flips today (DHAKA): {r['flips_today']}.",
         ]
         if r["trend"]:
             last = r["trend"][-1]

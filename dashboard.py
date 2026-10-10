@@ -147,7 +147,7 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
 <div class="wrap hidden" id="app">
 
 <header>
-  <h1>BD Visa Slot Monitor<span id="field"></span></h1>
+  <h1>Bangladesh Visa Monitor<span id="field"></span></h1>
   <div id="statusPill" class="pill unk"><span class="dot"></span><span>loading&hellip;</span></div>
 </header>
 
@@ -158,14 +158,14 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
 <section>
   <h2>Availability trend <em id="trendRange"></em></h2>
   <div class="bars" id="trend"></div>
-  <div class="axis"><span id="trendFirst"></span><span>uptime % per day (BST)</span><span id="trendLast"></span></div>
-  <div class="note">Each bar = one calendar day in BST. Hover a bar for exact figures.</div>
+  <div class="axis"><span id="trendFirst"></span><span>uptime % per day (Dhaka)</span><span id="trendLast"></span></div>
+  <div class="note">Each bar is one calendar day. Hover a bar for the exact numbers.</div>
 </section>
 
 <section>
-  <h2>Which hours does BD tend to open? <em>BST hour-of-day, last __DAYS__ days</em></h2>
+  <h2>When has Bangladesh been listed? <em>by hour of day, last __DAYS__ days</em></h2>
   <div class="heat" id="heat"></div>
-  <div class="note">Brighter = higher share of checks where Bangladesh was present. Grey = no data yet.</div>
+  <div class="note">Each cell is one hour of the day. Brighter = Bangladesh was listed in more of the checks made in that hour. Grey = no checks yet.</div>
 </section>
 
 <section>
@@ -201,8 +201,14 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
     if(!ts) return '\u2014';
     try {
       var d = new Date(ts);
-      return d.toLocaleString(undefined,{year:'numeric',month:'short',day:'2-digit',
-        hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      // Every time on this page is Dhaka time (Asia/Dhaka, UTC+6), regardless
+      // of where the reader is. Without an explicit timeZone the browser would
+      // show the viewer's own clock, which would silently misreport everything.
+      return new Intl.DateTimeFormat('en-GB', {
+        year:'numeric', month:'short', day:'2-digit',
+        hour:'2-digit', minute:'2-digit', second:'2-digit',
+        hour12:true, timeZone:'Asia/Dhaka'
+      }).format(d);
     } catch(e){ return esc(ts); }
   }
   function cls(s){ return s==='ONLINE'?'on':(s==='OFFLINE'?'off':'unk'); }
@@ -249,10 +255,10 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
       pill.innerHTML = '<span class="dot"></span><span>' + icon(cur.state)+' '+label(cur.state)+'</span>';
 
       var head = cur.state==='ONLINE'
-        ? 'Bangladesh <b>is currently present</b> in the country dropdown'
+        ? 'Bangladesh <b>is listed</b> in the India visa country dropdown'
         : (cur.state==='OFFLINE'
-          ? 'Bangladesh <b>is currently absent</b> from the country dropdown'
-          : 'Monitor state is <b>unknown</b> \u2014 the site could not be read');
+          ? 'Bangladesh <b>is not listed</b> in the India visa country dropdown'
+          : 'The monitor <b>cannot read</b> the dropdown right now');
 
       document.getElementById('summary').innerHTML =
         head + ' \u2014 ' + esc(cur.streak_human) + ' ' +
@@ -263,12 +269,12 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
     }
 
     var t = D.totals, tiles = [
-      ['Uptime ('+D.window_days+'d)', t.uptime_pct+'%', t.online+' online / '+t.offline+' offline'],
+      ['Listed ('+D.window_days+'d)', t.uptime_pct+'%', 'in '+t.online+' of '+(t.online+t.offline)+' checks'],
       ['Current streak', cur ? cur.streak_human : '\u2014', cur ? 'since '+tz(cur.since) : 'no data'],
-      ['Longest ONLINE', D.longest_online_human, 'in the last '+D.window_days+' days'],
-      ['Flips today', String(D.flips_today), 'BST calendar day'],
-      ['Checks in window', String(t.samples), t.unknown ? (t.unknown+' unknown') : 'no outages'],
-      ['Generated', tz(D.generated_at), 'all times shown in your local zone']
+      ['Longest listed', D.longest_online_human, 'over the last '+D.window_days+' days'],
+      ['Changes today', String(D.flips_today), 'Dhaka day'],
+      ['Checks in window', String(t.samples), t.unknown ? (t.unknown+' failed') : 'all checks ran'],
+      ['Updated', tz(D.generated_at), 'Dhaka time (UTC+6)']
     ];
     document.getElementById('stats').innerHTML = tiles.map(function(x){
       return '<div class="stat"><div class="k">'+esc(x[0])+'</div>'+
@@ -276,7 +282,7 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
     }).join('');
 
     var trend = D.trend || [];
-    document.getElementById('trendRange').textContent = trend.length ? (trend.length+' days') : '';
+    document.getElementById('trendRange').textContent = trend.length ? (trend.length + (trend.length === 1 ? ' day' : ' days')) : '';
     if (trend.length) {
       document.getElementById('trendFirst').textContent = trend[0].date;
       document.getElementById('trendLast').textContent  = trend[trend.length-1].date;
@@ -304,7 +310,7 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
         var a = 0.14 + (p/100)*0.86;
         var txt = p >= 55 ? '#0f1115' : '#e6e9ef';
         return '<div class="cell" style="background:rgba(46,204,113,'+a.toFixed(2)+');color:'+txt+'" '+
-               'title="'+String(h.hour).padStart(2,'0')+':00 BST \u2014 '+p+'% online ('+
+               'title="'+String(h.hour).padStart(2,'0')+':00 Dhaka \u2014 '+p+'% online ('+
                h.online+' on / '+h.offline+' off)">'+String(h.hour).padStart(2,'0')+'</div>';
       }).join('');
     } else {
@@ -314,7 +320,7 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
     var tr = D.transitions || [];
     if (tr.length) {
       document.getElementById('transitions').innerHTML =
-        '<table><thead><tr><th>Time (local)</th><th>Change</th><th>Previous state lasted</th><th>Started</th></tr></thead><tbody>'+
+        '<table><thead><tr><th>Time (Dhaka)</th><th>Change</th><th>Lasted</th><th>Since</th></tr></thead><tbody>'+
         tr.map(function(x){
           return '<tr><td>'+esc(tz(x.ts))+'</td>'+
             '<td><span class="tag '+cls(x.from)+'">'+label(x.from)+'</span> \u2192 '+
@@ -330,7 +336,7 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
     var sm = D.latest_samples || [];
     if (sm.length) {
       document.getElementById('samples').innerHTML =
-        '<table><thead><tr><th>Time (local)</th><th>State</th><th>Options</th><th>Latency</th><th>Error</th></tr></thead><tbody>'+
+        '<table><thead><tr><th>Time (Dhaka)</th><th>State</th><th>Options</th><th>Latency</th><th>Error</th></tr></thead><tbody>'+
         sm.slice().reverse().map(function(s){
           return '<tr><td>'+esc(tz(s.ts))+'</td>'+
             '<td><span class="tag '+cls(s.state)+'">'+label(s.state)+'</span></td>'+
@@ -344,7 +350,7 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
 
     document.getElementById('foot').textContent =
       'Generated ' + tz(D.generated_at) + ' \u00b7 ' +
-      (D.field || 'target field') + ' \u00b7 all times local';
+      (D.field || 'target field') + ' \u00b7 all times Dhaka (UTC+6)';
 
     document.getElementById('app').classList.remove('hidden');
   }
@@ -495,7 +501,7 @@ def _plain_text(d: dict[str, Any]) -> str:
         (
             f"Current state : {cur.get('state', 'n/a') if cur else 'n/a'}"
             + (
-                f"  (for {cur.get('streak_human', '?')}, since {cur.get('since_bst', '?')})"
+                f"  (for {cur.get('streak_human', '?')}, since {cur.get('since_dhaka', '?')})"
                 if cur
                 else ""
             )
@@ -516,10 +522,10 @@ def _plain_text(d: dict[str, Any]) -> str:
         lines.append("  (none recorded yet)")
     for x in tr[:10]:
         lines.append(
-            f"  {x.get('ts_bst', '?')}  {x.get('from', '?')} -> {x.get('to', '?')}  "
+            f"  {x.get('ts_dhaka', '?')}  {x.get('from', '?')} -> {x.get('to', '?')}  "
             f"(previous held {x.get('duration_human', '?')})"
         )
-    lines += ["", "Daily uptime % (BST):"]
+    lines += ["", "Daily uptime % (Dhaka time):"]
     trend = d.get("trend") or []
     if not trend:
         lines.append("  (no full days yet)")
