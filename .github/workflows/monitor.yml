@@ -1,46 +1,44 @@
 # Hosted monitor: polls the Indian visa country dropdown and publishes a
 # static dashboard to GitHub Pages.
 #
-# Scheduling notes (from GitHub's own docs):
-#   * The shortest interval for `schedule` is 5 minutes.
-#   * Scheduled runs are often DELAYED at the top of every hour, and may be
-#     dropped under load, so every trigger here sits at :55 or on offset
-#     minutes (:07/:22/:37/:52) rather than :00.
-#   * All cron fields are UTC. Bangladesh Standard Time is UTC+6, so:
+# WHY LONG JOBS INSTEAD OF MANY SHORT CRON RUNS
+# ---------------------------------------------
+# GitHub's scheduler proved unreliable with ~96 short runs/day: scheduled
+# runs arrive late or get dropped, and the `concurrency` group (which must
+# exist to stop runs racing on the shared `data` branch) keeps only one run
+# pending -- so a long job silently cancels everything queued behind it.
+#
+# Instead: one job every 2 hours, each looping internally for 2h10m. That is
+# 12 scheduled events per day instead of 96, with continuous coverage and no
+# queue contention. The monitor's own scheduler picks the poll interval:
+# 60-90s while inside a reset window, 15 min otherwise.
+#
+# SCHEDULING NOTES (from GitHub's own docs)
+# ----------------------------------------
+#   * The shortest `schedule` interval is 5 minutes.
+#   * Scheduled runs are often DELAYED at the top of every hour and may be
+#     dropped under load, so every trigger sits at :07 rather than :00.
+#   * All cron fields are UTC. Bangladesh Standard Time is UTC+6:
 #         00:00-00:30 BST  ==  18:00-18:30 UTC (previous day)
 #         08:00-09:30 BST  ==  02:00-03:30 UTC
-#     Each burst therefore starts 5 minutes early so a delayed start still
-#     covers the whole window.
+#     Jobs overlap slightly (2h10m run on a 2h trigger) so a delayed start
+#     never leaves a gap.
 #
-# The burst jobs are the trick that beats the 5-minute cron floor: one run
-# starts just before a reset window and then polls every 60-90s internally
-# for the length of that window. Cron cannot do 60s, but a job loop can.
+# STATE
+# -----
+# samples.jsonl / transitions.jsonl / state.json are force-pushed to the
+# `data` branch as a SINGLE parentless commit each run, so the branch never
+# accumulates history while the files themselves retain the full window.
 #
-# Runtime state (samples.jsonl, transitions.jsonl, state.json) is force-
-# pushed to the `data` branch as a SINGLE parentless commit each run, so the
-# branch never accumulates history -- only the current snapshot is retained.
-# That keeps the repo small forever while still giving the dashboard a full
-# 30-day window of raw samples to compute trends from.
-#
-# The `WEBHOOK_URL` and `DASH_PASSPHRASE` values come from repository
-# secrets and are never written into this file, so it is safe to keep the
-# repo public.
+# `WEBHOOK_URL` and `DASH_PASSPHRASE` come from repository secrets and are
+# never written into this file, so it is safe to keep the repo public.
 name: monitor
-
-# NOTE: GitHub re-parses this file and re-registers the cron schedule on
-# every push to the default branch. If scheduled runs ever stop appearing in
-# the Actions tab while manual runs still work, push a trivial change here to
-# force re-registration.
 
 on:
   schedule:
-    # Baseline: every 15 minutes, on offset minutes to dodge the
-    # top-of-the-hour congestion that delays scheduled runs.
-    - cron: "7,22,37,52 * * * *"
-    # Fast window 1: 23:55 BST (17:55 UTC) -> poll fast for 40 min.
-    - cron: "55 17 * * *"
-    # Fast window 2: 07:55 BST (01:55 UTC) -> poll fast for 110 min.
-    - cron: "55 1 * * *"
+    # Every 2 hours at :07. Covers 00:00-00:30 and 08:00-09:30 BST because
+    # each job spans 2h10m and the monitor polls fast inside those windows.
+    - cron: "7 */2 * * *"
   workflow_dispatch:
     inputs:
       burst_minutes:
@@ -48,8 +46,7 @@ on:
         default: "0"
         required: false
 
-# One monitor at a time: the baseline and the two bursts all write the same
-# data branch, and concurrent runs would race on it.
+# One monitor at a time: every run writes the same `data` branch.
 concurrency:
   group: monitor
   cancel-in-progress: false
@@ -62,8 +59,8 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    # Longest burst is 110 min; leave headroom for retries and slow checks.
-    timeout-minutes: 150
+    # A 2h10m run needs headroom above its own loop time.
+    timeout-minutes: 160
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -95,19 +92,20 @@ jobs:
         id: mode
         run: |
           set -euo pipefail
-          # Manual dispatch can request an arbitrary burst length.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             burst="${{ github.event.inputs.burst_minutes }}"
-            echo "burst=${burst:-0}" >> "$GITHUB_OUTPUT"
-            echo "manual dispatch: burst=${burst:-0} min"
+            burst="${burst:-0}"
+            echo "burst=$burst" >> "$GITHUB_OUTPUT"
+            echo "force_fast=$([ "$burst" -gt 0 ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
+            echo "manual dispatch: burst=$burst min"
             exit 0
           fi
-          # Scheduled runs: map the cron that fired to a burst length.
-          case "${{ github.event.schedule }}" in
-            "55 17 * * *") echo "burst=40"  >> "$GITHUB_OUTPUT" ;;  # 23:55 BST
-            "55 1 * * *")  echo "burst=110" >> "$GITHUB_OUTPUT" ;;  # 07:55 BST
-            *)             echo "burst=0"   >> "$GITHUB_OUTPUT" ;;  # baseline
-          esac
+          # Scheduled: one long run spanning the next two hours. The monitor
+          # itself switches to 60-90s polling whenever it is inside a BST
+          # reset window, so --force-fast is deliberately NOT passed here.
+          echo "burst=130" >> "$GITHUB_OUTPUT"
+          echo "force_fast=0" >> "$GITHUB_OUTPUT"
+          echo "scheduled: 2h10m continuous run, schedule-aware intervals"
 
       - name: Run monitor
         env:
@@ -116,9 +114,12 @@ jobs:
         run: |
           set -euo pipefail
           burst="${{ steps.mode.outputs.burst }}"
+          fast="${{ steps.mode.outputs.force_fast }}"
           if [ "$burst" -gt 0 ]; then
-            echo ">>> fast burst for ${burst} min"
-            python monitor.py --burst-min "$burst" --force-fast --no-startup-webhook
+            args="--burst-min $burst --no-startup-webhook"
+            [ "$fast" = "1" ] && args="$args --force-fast"
+            echo ">>> looping for ${burst} min"
+            python monitor.py $args
           else
             echo ">>> single baseline check"
             python monitor.py --once
@@ -138,10 +139,8 @@ jobs:
           GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         run: |
           set -euo pipefail
-          # Build a parentless commit holding only the state files, then
-          # force-push it. Because the commit has no parent, the previous
-          # snapshot becomes unreachable and GitHub's GC reclaims it, so the
-          # branch stays one-commit-small no matter how long it runs.
+          # Parentless commit + force push: the branch keeps exactly one
+          # snapshot, so repo size stays constant however long it runs.
           export GIT_INDEX_FILE=/tmp/state.index
           git read-tree --empty
           git add -f data state.json
